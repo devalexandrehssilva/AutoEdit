@@ -1,28 +1,18 @@
 import os
+from flask import Flask, request, jsonify
 from moviepy import VideoFileClip, concatenate_videoclips
 
-def auto_edit_video(input_path, output_path, segments):
-    """
-    segments: Lista de tuplas com (start_time, end_time) em segundos
-    """
-    video = VideoFileClip(input_path)
-    clips = []
+app = Flask(__name__)
 
-    try:
-        for start, end in segments:
-            # Extrai o trecho relevante
-            clip = video.subclip(start, end)
-            clips.append(clip)
+@app.route('/')
+def health():
+    return "Servidor de Edição Ativo", 200
 
-        # Concatena os trechos selecionados
-        final_video = concatenate_videoclips(clips)
-        
-        # Renderização com codec otimizado
-        final_video.write_videofile(output_path, codec="libx264", audio_codec="aac", fps=24)
-        
-    finally:
-        video.close()
+@app.route('/edit', methods=['POST'])
+def edit():
+    # Aqui virá a lógica que discutimos
+    return jsonify({"status": "recebido"})
 
-# Exemplo de uso: O Agente de IA forneceu esses timestamps
-momentos_relevantes = [(10, 25), (45, 60), (120, 150)]
-auto_edit_video("video_bruto.mp4", "video_final.mp4", momentos_relevantes)
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
