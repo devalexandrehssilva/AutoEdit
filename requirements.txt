@@ -1,0 +1,3 @@
+moviepy
+google-generativeai
+flask
