@@ -1,94 +1,115 @@
 import os
 import threading
 import requests
+import yt_dlp
 from flask import Flask, request, jsonify
 from moviepy import VideoFileClip, concatenate_videoclips
 
 app = Flask(__name__)
 
 # --- CONFIGURAÇÕES ---
-# Pegue seu Token no @BotFather e coloque aqui ou nas variáveis do Railway
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "SEU_TOKEN_AQUI")
+# O Token deve ser configurado nas Variáveis de Ambiente do Railway
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-def send_video_to_telegram(chat_id, video_path):
-    """Envia o arquivo final editado de volta para o usuário no Telegram"""
+def send_video_to_telegram(chat_id, video_path, caption="✅ Vídeo editado com sucesso!"):
+    """Envia o arquivo final para o Telegram"""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
     try:
         with open(video_path, 'rb') as video:
             files = {'video': video}
-            data = {'chat_id': chat_id, 'caption': "✅ Aqui está seu vídeo editado!"}
+            data = {'chat_id': chat_id, 'caption': caption}
             response = requests.post(url, files=files, data=data)
-            print(f"Telegram Response: {response.status_code}")
+            return response.status_code == 200
     except Exception as e:
         print(f"Erro ao enviar para Telegram: {e}")
+        return False
+
+def get_direct_url(url):
+    """Converte links do YouTube ou limpa links do Dropbox/Drive"""
+    # Se for YouTube
+    if "youtube.com" in url or "youtu.be" in url:
+        ydl_opts = {
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'quiet': True,
+            'no_warnings': True
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return info['url']
+    
+    # Se for Dropbox, garante link de download direto
+    if "dropbox.com" in url:
+        return url.replace("?dl=0", "?dl=1").replace("www.dropbox.com", "dl.dropboxusercontent.com")
+        
+    return url
 
 def process_video_task(video_url, segments, chat_id):
-    """Lógica de edição em segundo plano"""
-    output_path = "video_final.mp4"
+    """Processamento pesado em segundo plano"""
+    output_filename = f"final_{chat_id}.mp4"
     
     try:
-        print(f"Iniciando download e edição: {video_url}")
+        print(f"Processando vídeo: {video_url}")
         
-        # Carrega o vídeo diretamente da URL (MoviePy 2.0+ suporta via FFmpeg)
-        video = VideoFileClip(video_url)
+        # 1. Obtém a URL real do vídeo
+        direct_url = get_direct_url(video_url)
         
+        # 2. Abre o vídeo (MoviePy 2.0+ lê URLs via FFmpeg)
+        video = VideoFileClip(direct_url)
+        
+        # 3. Executa os cortes
         clips = []
         for start, end in segments:
-            # Cria os cortes baseados nos timestamps
             clip = video.subclip(start, end)
             clips.append(clip)
         
-        # Concatena os pedaços
+        # 4. Concatena e Renderiza
         final_video = concatenate_videoclips(clips)
-        
-        # Renderiza o arquivo (preset 'ultrafast' para economizar CPU no Railway)
         final_video.write_videofile(
-            output_path, 
-            codec="libx264", 
-            audio_codec="aac", 
-            temp_audiofile='temp-audio.m4a', 
+            output_filename,
+            codec="libx264",
+            audio_codec="aac",
+            temp_audiofile=f"audio_{chat_id}.m4a",
             remove_temp=True,
-            preset="ultrafast"
+            preset="ultrafast", # Essencial para não estourar CPU no Railway
+            threads=4
         )
         
-        # Fecha os arquivos para liberar memória
+        # 5. Limpeza de memória
         video.close()
         final_video.close()
-
-        # Envia o resultado
-        send_video_to_telegram(chat_id, output_path)
         
-        # Limpa o arquivo local para não encher o disco do servidor
-        if os.path.exists(output_path):
-            os.remove(output_path)
-
+        # 6. Envio
+        send_video_to_telegram(chat_id, output_filename)
+        
     except Exception as e:
-        print(f"Erro no processamento: {e}")
-        # Opcional: enviar mensagem de erro para o Telegram do usuário
+        error_msg = f"❌ Erro no processamento: {str(e)}"
+        print(error_msg)
         requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", 
-                      data={'chat_id': chat_id, 'text': f"❌ Erro na edição: {str(e)}"})
+                      data={'chat_id': chat_id, 'text': error_msg})
+    finally:
+        # 7. Limpa o arquivo do disco para economizar espaço
+        if os.path.exists(output_filename):
+            os.remove(output_filename)
 
 @app.route('/')
 def health():
-    return "Editor IA Online", 200
+    return "Editor de Vídeo IA Ativo", 200
 
 @app.route('/edit', methods=['POST'])
-def start_edit():
+def handle_edit():
     data = request.json
-    
-    # Extrai os dados enviados pelo Make.com
     video_url = data.get('video_url')
-    segments = data.get('segments') # Formato: [[0, 10], [20, 30]]
-    chat_id = data.get('chat_id')   # ID do usuário do Telegram
+    segments = data.get('segments') # Ex: [[0, 10], [30, 40]]
+    chat_id = data.get('chat_id')
 
-    if not video_url or not segments or not chat_id:
-        return jsonify({"error": "Dados incompletos"}), 400
+    if not all([video_url, segments, chat_id]):
+        return jsonify({"error": "Parâmetros ausentes"}), 400
 
-    # Inicia o processamento sem travar a requisição (Assíncrono)
+    # Dispara a Thread para o Make.com não receber Timeout
     thread = threading.Thread(target=process_video_task, args=(video_url, segments, chat_id))
     thread.start()
 
-    return jsonify({"status": "processing", "message": "Aguarde o envio no Telegram"}), 202
+    return jsonify({"status": "accepted", "message": "Vídeo em processamento"}), 202
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
