@@ -1,5 +1,5 @@
 import os
-from moviepy.editor import VideoFileClip, concatenate_videoclips
+from moviepy import VideoFileClip, concatenate_videoclips
 
 def auto_edit_video(input_path, output_path, segments):
     """
