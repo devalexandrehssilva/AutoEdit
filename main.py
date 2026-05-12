@@ -42,15 +42,18 @@ def process_video_task(video_url, segments, chat_id):
 
         # 2. Download físico do vídeo (Garante que o MoviePy não dê 'Not Found')
         # Configuração ultra-compatível
+        # Configuração de download robusta
         ydl_opts = {
             'cookiefile': actual_cookies,
-            # 'best' garante que ele pegue o que estiver disponível sem travar
-            'format': 'bestvideo+bestaudio/best', 
+            # Tenta baixar o melhor vídeo e áudio e unir em mp4, 
+            # ou baixa o melhor arquivo único disponível se falhar.
+            'format': 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4] / bv*+ba/b',
             'outtmpl': input_file,
-            'merge_output_format': 'mp4', # Força a união em MP4
+            'merge_output_format': 'mp4',
             'quiet': True,
             'no_warnings': True,
-    
+            # Garante que o yt-dlp use o ffmpeg instalado no sistema para a fusão
+            'prefer_ffmpeg': True,
         }
         
         print(f"📥 Baixando vídeo: {video_url}")
