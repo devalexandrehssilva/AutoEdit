@@ -28,20 +28,21 @@ def get_drive_direct_link(url):
         except: return url
     return url
 
-def create_subtitles(video_clip):
-    """Extrai áudio, transcreve e cria os clipes de texto com fonte padrão"""
+def create_subtitles(video_path):
+    """Extrai áudio direto do arquivo original para economizar RAM"""
     audio_path = "temp_audio.mp3"
     try:
-        print("🔊 Extraindo áudio para legenda...")
-        video_clip.audio.write_audiofile(audio_path, logger=None)
+        print("🔊 Extraindo áudio do arquivo original...")
+        # Usamos um clipe temporário só para extrair o áudio e fechamos logo em seguida
+        temp_clip = VideoFileClip(video_path)
+        temp_clip.audio.write_audiofile(audio_path, logger=None)
+        temp_clip.close()
         
-        print("🎙️ Transcrevendo com Whisper (Tiny)...")
-        # fp16=False evita erros em servidores sem GPU (como o Railway)
+        print("🎙️ Transcrevendo com Whisper...")
+        # Otimização: Whisper Tiny + fp16 False para usar menos RAM
         result = model.transcribe(audio_path, language='pt', fp16=False)
         
         subtitle_clips = []
-        print(f"✅ Transcrição concluída! Gerando {len(result['segments'])} clipes de texto.")
-
         for segment in result['segments']:
             txt = TextClip(
                 text=segment['text'].strip(),
@@ -50,75 +51,67 @@ def create_subtitles(video_clip):
                 stroke_color='black',
                 stroke_width=1,
                 method='caption',
-                size=(video_clip.w * 0.8, None),
-                font="DejaVu-Sans"  # <-- Forçando uma fonte comum no Linux
+                size=(720 * 0.8, None), # Largura fixa baseada em HD padrão
+                font="DejaVu-Sans"
             ).with_start(segment['start']).with_duration(segment['end'] - segment['start']).with_position(('center', 'bottom'))
-            
             subtitle_clips.append(txt)
         
         return subtitle_clips
     except Exception as e:
-        print(f"⚠️ Erro ao gerar legendas: {e}")
-        return [] # Se der erro, retorna lista vazia para o vídeo sair sem legenda mas não travar
+        print(f"⚠️ Erro na legenda: {e}")
+        return []
     finally:
-        if os.path.exists(audio_path):
-            os.remove(audio_path)
+        if os.path.exists(audio_path): os.remove(audio_path)
 
 def process_video_task(video_url, segments, chat_id):
     input_file = f"in_{chat_id}.mp4"
     output_file = f"out_{chat_id}.mp4"
     
     try:
-        # DOWNLOAD (YouTube ou Drive)
-        if 'drive.google.com' in video_url:
-            direct_link = get_drive_direct_link(video_url)
-            response = requests.get(direct_link, stream=True)
-            with open(input_file, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192): f.write(chunk)
-        else:
-            ydl_opts = {'format': 'best', 'outtmpl': input_file, 'quiet': True}
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl: ydl.download([video_url])
+        # 1. Download (Drive ou YT) - Igual ao anterior
+        # ... [Mantenha sua lógica de download aqui] ...
 
-        # EDIÇÃO
-        print("✂️ Cortando e Legendando...")
+        # 2. Gerar legendas PRIMEIRO (usando o arquivo original para salvar RAM)
+        subtitle_clips = create_subtitles(input_file)
+
+        # 3. Edição dos Cortes
+        print("✂️ Cortando vídeo...")
         video = VideoFileClip(input_file)
+        # Forçamos o FPS para evitar o erro 'CompositeAudioClip has no attribute fps'
+        if video.fps is None: video.fps = 24 
         
-        # Fazendo os cortes
-        clips = []
-        for s, e in segments:
-            clip = video.subclipped(s, e) if hasattr(video, 'subclipped') else video.subclip(s, e)
-            clips.append(clip)
-        
+        clips = [video.subclipped(s, e) for s, e in segments]
         final_video = concatenate_videoclips(clips)
         
-        # GERANDO LEGENDAS
-        subtitle_clips = create_subtitles(final_video)
-        
-        # Sobrepondo as legendas no vídeo
-        result_video = CompositeVideoClip([final_video] + subtitle_clips)
-        
-        # RENDERIZAÇÃO
+        # 4. Composição Final
+        if subtitle_clips:
+            print("🎬 Aplicando legendas no corte final...")
+            result_video = CompositeVideoClip([final_video] + subtitle_clips)
+        else:
+            result_video = final_video
+
+        # 5. Renderização ultra-leve
         result_video.write_videofile(
-            output_file, 
-            codec="libx264", 
-            audio_codec="aac", 
-            temp_audiofile=f"audio_{chat_id}.m4a",
-            remove_temp=True,
-            preset="ultrafast"
+            output_file,
+            fps=24, # Força o FPS na saída
+            codec="libx264",
+            audio_codec="aac",
+            preset="ultrafast",
+            logger=None
         )
         
+        # Fechamento seguro
         video.close()
         result_video.close()
         
-        # ENVIO
-        with open(output_file, 'rb') as vf:
-            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", 
-                          files={'video': vf}, data={'chat_id': chat_id})
-        
+        # Envio...
+        # ... [Mantenha sua lógica de envio aqui] ...
+
     except Exception as e:
         requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", 
                       data={'chat_id': chat_id, 'text': f"❌ Erro: {str(e)}"})
     finally:
+        # Limpeza...
         for f in [input_file, output_file]:
             if os.path.exists(f): os.remove(f)
 
