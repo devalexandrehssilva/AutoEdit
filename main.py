@@ -4,7 +4,8 @@ import requests
 import yt_dlp
 import tempfile
 from flask import Flask, request, jsonify
-from moviepy import VideoFileClip, concatenate_videoclips
+from moviepy.video.io.VideoFileClip import VideoFileClip
+from moviepy.video.compositing.concatenate import concatenate_videoclips
 
 app = Flask(__name__)
 
