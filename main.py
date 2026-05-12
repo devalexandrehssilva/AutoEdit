@@ -41,12 +41,16 @@ def process_video_task(video_url, segments, chat_id):
             actual_cookies = COOKIES_FILE_NAME
 
         # 2. Download físico do vídeo (Garante que o MoviePy não dê 'Not Found')
+        # Configuração ultra-compatível
         ydl_opts = {
             'cookiefile': actual_cookies,
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            # 'best' garante que ele pegue o que estiver disponível sem travar
+            'format': 'bestvideo+bestaudio/best', 
             'outtmpl': input_file,
+            'merge_output_format': 'mp4', # Força a união em MP4
             'quiet': True,
             'no_warnings': True,
+    
         }
         
         print(f"📥 Baixando vídeo: {video_url}")
