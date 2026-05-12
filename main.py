@@ -8,48 +8,107 @@ from moviepy import VideoFileClip, concatenate_videoclips
 
 app = Flask(__name__)
 
+# --- CONFIGURAÇÕES DE AMBIENTE (RAILWAY) ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-# Pega o conteúdo dos cookies da variável de ambiente caso o arquivo falhe
-COOKIES_ENV = os.environ.get("YOUTUBE_COOKIES_CONTENT")
+# Dica: Cole o conteúdo do seu cookies.txt na variável YOUTUBE_COOKIES_CONTENT no Railway
+COOKIES_CONTENT = os.environ.get("YOUTUBE_COOKIES_CONTENT")
+COOKIES_FILE_NAME = "youtube_cookies.txt"
 
-def create_temp_cookies():
-    """Cria um arquivo temporário de cookies para o yt-dlp usar"""
-    if COOKIES_ENV:
-        temp_path = os.path.join(tempfile.gettempdir(), "cookies.txt")
-        with open(temp_path, "w", encoding="utf-8") as f:
-            f.write(COOKIES_ENV)
-        return temp_path
-    return "youtube_cookies.txt" # fallback para o arquivo local
+def send_telegram_video(chat_id, video_path, caption="🎬 Seu vídeo está pronto!"):
+    """Envia o arquivo final para o Telegram"""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
+    try:
+        with open(video_path, 'rb') as video:
+            files = {'video': video}
+            data = {'chat_id': chat_id, 'caption': caption}
+            requests.post(url, files=files, data=data)
+    except Exception as e:
+        print(f"Erro no envio: {e}")
 
 def process_video_task(video_url, segments, chat_id):
-    cookies_path = create_temp_cookies()
+    """Tarefa de processamento: Baixa, Corta e Envia"""
     input_file = f"in_{chat_id}.mp4"
     output_file = f"out_{chat_id}.mp4"
+    temp_cookies = os.path.join(tempfile.gettempdir(), f"cookies_{chat_id}.txt")
     
     try:
+        # 1. Gerenciamento de Cookies (Prioriza Variável de Ambiente, depois Arquivo)
+        if COOKIES_CONTENT:
+            with open(temp_cookies, "w", encoding="utf-8") as f:
+                f.write(COOKIES_CONTENT)
+            actual_cookies = temp_cookies
+        else:
+            actual_cookies = COOKIES_FILE_NAME
+
+        # 2. Download físico do vídeo (Garante que o MoviePy não dê 'Not Found')
         ydl_opts = {
-            'cookiefile': cookies_path,
+            'cookiefile': actual_cookies,
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
             'outtmpl': input_file,
             'quiet': True,
+            'no_warnings': True,
         }
         
+        print(f"📥 Baixando vídeo: {video_url}")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([video_url])
 
+        # 3. Edição com MoviePy
+        print("✂️ Iniciando cortes...")
         video = VideoFileClip(input_file)
-        clips = [video.subclip(s, e) for s, e in segments]
-        final = concatenate_videoclips(clips)
-        final.write_videofile(output_file, codec="libx264", audio_codec="aac", preset="ultrafast")
+        clips = [video.subclip(start, end) for start, end in segments]
+        final_video = concatenate_videoclips(clips)
+        
+        # 4. Renderização (Preset ultrafast para evitar timeout no Railway)
+        final_video.write_videofile(
+            output_file,
+            codec="libx264",
+            audio_codec="aac",
+            temp_audiofile=f"audio_{chat_id}.m4a",
+            remove_temp=True,
+            preset="ultrafast",
+            threads=4
+        )
         
         video.close()
-        final.close()
+        final_video.close()
         
-        send_video_to_telegram(chat_id, output_file)
+        # 5. Envio
+        print("📤 Enviando para o Telegram...")
+        send_telegram_video(chat_id, output_file)
         
     except Exception as e:
+        error_msg = f"❌ Erro no processamento: {str(e)}"
+        print(error_msg)
         requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", 
-                      data={'chat_id': chat_id, 'text': f"❌ Erro: {str(e)}"})
+                      data={'chat_id': chat_id, 'text': error_msg})
     finally:
-        for f in [input_file, output_file]:
-            if os.path.exists(f): os.remove(f)
+        # Limpeza total
+        for f in [input_file, output_file, temp_cookies]:
+            if os.path.exists(f):
+                os.remove(f)
+
+@app.route('/')
+def health():
+    return "Servidor AutoEdit Online", 200
+
+@app.route('/edit', methods=['POST'])
+def handle_edit():
+    """Rota principal chamada pelo Make.com"""
+    data = request.json
+    video_url = data.get('video_url')
+    segments = data.get('segments')
+    chat_id = data.get('chat_id')
+
+    if not all([video_url, segments, chat_id]):
+        return jsonify({"error": "Dados incompletos"}), 400
+
+    # Inicia a thread para liberar o Make.com imediatamente
+    thread = threading.Thread(target=process_video_task, args=(video_url, segments, chat_id))
+    thread.start()
+
+    return jsonify({"status": "processando"}), 202
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
