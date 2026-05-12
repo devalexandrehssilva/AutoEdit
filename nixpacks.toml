@@ -2,7 +2,7 @@
 nixPkgs = ["python3", "ffmpeg", "imagemagick"]
 
 [phases.build]
-cmds = ["pip install -r requirements.txt"]
+cmds = ["chmod +x post_install.sh && ./post_install.sh", "pip install -r requirements.txt"]
 
 [start]
 cmd = "python main.py"
