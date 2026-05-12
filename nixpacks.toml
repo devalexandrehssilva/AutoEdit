@@ -1,8 +1,8 @@
 [phases.setup]
-nixPkgs = ["python3", "ffmpeg", "imagemagick"]
+nixPkgs = ["python3", "ffmpeg"]
 
 [phases.build]
-cmds = ["chmod +x post_install.sh && ./post_install.sh", "pip install -r requirements.txt"]
+cmds = ["pip install -r requirements.txt"]
 
 [start]
 cmd = "python main.py"
