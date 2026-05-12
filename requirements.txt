@@ -3,3 +3,5 @@ flask
 requests
 yt-dlp
 gunicorn
+openai-whisper
+setuptools
