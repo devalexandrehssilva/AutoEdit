@@ -3,129 +3,122 @@ import threading
 import requests
 import yt_dlp
 import tempfile
+import whisper
 from flask import Flask, request, jsonify
+
+# Importações corrigidas para MoviePy 2.0
 from moviepy.video.io.VideoFileClip import VideoFileClip
 from moviepy.video.compositing.concatenate import concatenate_videoclips
+from moviepy.video.VideoClip import TextClip
+from moviepy.video.compositing.CompositeVideoClip import CompositeVideoClip
 
 app = Flask(__name__)
 
-# --- CONFIGURAÇÕES DO RAILWAY ---
+# Carrega o modelo Whisper (Tiny é o melhor para o Railway não travar)
+model = whisper.load_model("tiny")
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-# Variável de ambiente com o texto dos cookies (opcional para o Plano B)
-COOKIES_CONTENT = os.environ.get("YOUTUBE_COOKIES_CONTENT")
 
 def get_drive_direct_link(url):
-    """Transforma link de visualização do Drive em link de download direto"""
     if 'drive.google.com' in url:
         try:
-            # Extrai o ID do arquivo da URL do Drive
             parts = url.split('/')
             file_id = parts[parts.index('d') + 1]
             return f'https://drive.google.com/uc?export=download&id={file_id}'
-        except:
-            return url
+        except: return url
     return url
 
+def create_subtitles(video_clip):
+    """Extrai áudio, transcreve e cria os clipes de texto"""
+    audio_path = "temp_audio.mp3"
+    video_clip.audio.write_audiofile(audio_path, logger=None)
+    
+    print("🎙️ Transcrevendo áudio com Whisper...")
+    result = model.transcribe(audio_path, language='pt')
+    
+    subtitle_clips = []
+    for segment in result['segments']:
+        # Criando a legenda visual
+        txt = TextClip(
+            text=segment['text'].strip(),
+            font_size=24,
+            color='yellow',
+            stroke_color='black',
+            stroke_width=1,
+            method='caption',
+            size=(video_clip.w * 0.8, None)
+        ).with_start(segment['start']).with_duration(segment['end'] - segment['start']).with_position(('center', 'bottom'))
+        
+        subtitle_clips.append(txt)
+    
+    if os.path.exists(audio_path):
+        os.remove(audio_path)
+    return subtitle_clips
+
 def process_video_task(video_url, segments, chat_id):
-    """Baixa o vídeo (Drive ou YT), corta e envia para o Telegram"""
     input_file = f"in_{chat_id}.mp4"
     output_file = f"out_{chat_id}.mp4"
-    temp_cookies = os.path.join(tempfile.gettempdir(), f"cookies_{chat_id}.txt")
     
     try:
-        # --- PASSO 1: DOWNLOAD ---
+        # DOWNLOAD (YouTube ou Drive)
         if 'drive.google.com' in video_url:
-            print(f"📥 Baixando do Drive para o chat {chat_id}...")
             direct_link = get_drive_direct_link(video_url)
             response = requests.get(direct_link, stream=True)
             with open(input_file, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk: f.write(chunk)
+                for chunk in response.iter_content(chunk_size=8192): f.write(chunk)
         else:
-            print(f"📥 Tentando download do YouTube para o chat {chat_id}...")
-            if COOKIES_CONTENT:
-                with open(temp_cookies, "w", encoding="utf-8") as f:
-                    f.write(COOKIES_CONTENT)
-            
-            ydl_opts = {
-                'cookiefile': temp_cookies if COOKIES_CONTENT else None,
-                'format': 'best',
-                'outtmpl': input_file,
-                'quiet': True,
-                'nocheckcertificate': True,
-                'extractor_args': {'youtube': {'player_client': ['ios']}},
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([video_url])
+            ydl_opts = {'format': 'best', 'outtmpl': input_file, 'quiet': True}
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl: ydl.download([video_url])
 
-        # --- PASSO 2: EDIÇÃO (MOVIEPY 2.0 COMPATÍVEL) ---
-        print("✂️ Iniciando cortes no vídeo...")
+        # EDIÇÃO
+        print("✂️ Cortando e Legendando...")
         video = VideoFileClip(input_file)
         
+        # Fazendo os cortes
         clips = []
         for s, e in segments:
-            # Tenta o comando da versão 2.0, se falhar usa o da 1.0
-            if hasattr(video, 'subclipped'):
-                clips.append(video.subclipped(s, e))
-            else:
-                clips.append(video.subclip(s, e))
+            clip = video.subclipped(s, e) if hasattr(video, 'subclipped') else video.subclip(s, e)
+            clips.append(clip)
         
         final_video = concatenate_videoclips(clips)
         
-        # Renderização rápida para o Railway
-        final_video.write_videofile(
+        # GERANDO LEGENDAS
+        subtitle_clips = create_subtitles(final_video)
+        
+        # Sobrepondo as legendas no vídeo
+        result_video = CompositeVideoClip([final_video] + subtitle_clips)
+        
+        # RENDERIZAÇÃO
+        result_video.write_videofile(
             output_file, 
             codec="libx264", 
             audio_codec="aac", 
             temp_audiofile=f"audio_{chat_id}.m4a",
             remove_temp=True,
-            preset="ultrafast",
-            threads=4
+            preset="ultrafast"
         )
         
         video.close()
-        final_video.close()
+        result_video.close()
         
-        # --- PASSO 3: ENVIO ---
-        print("📤 Enviando para o Telegram...")
+        # ENVIO
         with open(output_file, 'rb') as vf:
-            requests.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", 
-                files={'video': vf}, 
-                data={'chat_id': chat_id, 'caption': "✅ Seu corte está pronto!"}
-            )
+            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", 
+                          files={'video': vf}, data={'chat_id': chat_id})
         
     except Exception as e:
-        error_msg = f"❌ Erro técnico: {str(e)}"
-        print(error_msg)
         requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", 
-                      data={'chat_id': chat_id, 'text': error_msg})
+                      data={'chat_id': chat_id, 'text': f"❌ Erro: {str(e)}"})
     finally:
-        # Limpeza total de arquivos temporários
-        for f in [input_file, output_file, temp_cookies]:
-            if os.path.exists(f):
-                os.remove(f)
-
-@app.route('/')
-def health():
-    return "Editor de Vídeos Online", 200
+        for f in [input_file, output_file]:
+            if os.path.exists(f): os.remove(f)
 
 @app.route('/edit', methods=['POST'])
 def handle_edit():
     data = request.json
-    video_url = data.get('video_url')
-    segments = data.get('segments')
-    chat_id = data.get('chat_id')
-
-    if not all([video_url, segments, chat_id]):
-        return jsonify({"error": "Dados incompletos"}), 400
-
-    # Inicia o processamento em segundo plano (Thread)
-    thread = threading.Thread(target=process_video_task, args=(video_url, segments, chat_id))
+    thread = threading.Thread(target=process_video_task, args=(data['video_url'], data['segments'], data['chat_id']))
     thread.start()
-
-    return jsonify({"status": "processando"}), 202
+    return jsonify({"status": "ok"}), 202
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
