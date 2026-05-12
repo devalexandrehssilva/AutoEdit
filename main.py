@@ -29,31 +29,40 @@ def get_drive_direct_link(url):
     return url
 
 def create_subtitles(video_clip):
-    """Extrai áudio, transcreve e cria os clipes de texto"""
+    """Extrai áudio, transcreve e cria os clipes de texto com fonte padrão"""
     audio_path = "temp_audio.mp3"
-    video_clip.audio.write_audiofile(audio_path, logger=None)
-    
-    print("🎙️ Transcrevendo áudio com Whisper...")
-    result = model.transcribe(audio_path, language='pt')
-    
-    subtitle_clips = []
-    for segment in result['segments']:
-        # Criando a legenda visual
-        txt = TextClip(
-            text=segment['text'].strip(),
-            font_size=24,
-            color='yellow',
-            stroke_color='black',
-            stroke_width=1,
-            method='caption',
-            size=(video_clip.w * 0.8, None)
-        ).with_start(segment['start']).with_duration(segment['end'] - segment['start']).with_position(('center', 'bottom'))
+    try:
+        print("🔊 Extraindo áudio para legenda...")
+        video_clip.audio.write_audiofile(audio_path, logger=None)
         
-        subtitle_clips.append(txt)
-    
-    if os.path.exists(audio_path):
-        os.remove(audio_path)
-    return subtitle_clips
+        print("🎙️ Transcrevendo com Whisper (Tiny)...")
+        # fp16=False evita erros em servidores sem GPU (como o Railway)
+        result = model.transcribe(audio_path, language='pt', fp16=False)
+        
+        subtitle_clips = []
+        print(f"✅ Transcrição concluída! Gerando {len(result['segments'])} clipes de texto.")
+
+        for segment in result['segments']:
+            txt = TextClip(
+                text=segment['text'].strip(),
+                font_size=24,
+                color='yellow',
+                stroke_color='black',
+                stroke_width=1,
+                method='caption',
+                size=(video_clip.w * 0.8, None),
+                font="DejaVu-Sans"  # <-- Forçando uma fonte comum no Linux
+            ).with_start(segment['start']).with_duration(segment['end'] - segment['start']).with_position(('center', 'bottom'))
+            
+            subtitle_clips.append(txt)
+        
+        return subtitle_clips
+    except Exception as e:
+        print(f"⚠️ Erro ao gerar legendas: {e}")
+        return [] # Se der erro, retorna lista vazia para o vídeo sair sem legenda mas não travar
+    finally:
+        if os.path.exists(audio_path):
+            os.remove(audio_path)
 
 def process_video_task(video_url, segments, chat_id):
     input_file = f"in_{chat_id}.mp4"
